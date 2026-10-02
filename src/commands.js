@@ -80,7 +80,13 @@ const commands = [
         return msg.edit(ui.notice('No results found.', 'warn'));
       }
 
-      const session = await ctx.manager.ensureSession(ctx.guild, vc.id, ctx.channel.id);
+      let session;
+      try {
+        session = await ctx.manager.ensureSession(ctx.guild, vc.id, ctx.channel.id);
+      } catch (error) {
+        console.warn(`[command:play] voice connection failed: ${error.message}`);
+        return msg.edit(ui.notice("I found the track, but couldn't connect to voice right now. Please try again shortly.", 'error'));
+      }
       const room = config.maxQueue - session.tracks.length;
       if (room <= 0) return msg.edit(ui.notice('The queue is full.', 'warn'));
 

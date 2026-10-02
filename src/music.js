@@ -8,7 +8,6 @@ const ui = require('./ui');
 
 const CONNECTED = Constants.State.CONNECTED;
 const SEARCH_PREFIXES = ['ytsearch:', 'scsearch:'];
-const MAX_NODES_TRIED = 3;
 
 /** One instance per server the bot is playing in. */
 class GuildMusic {
@@ -263,6 +262,7 @@ class MusicManager {
     this.store = store;
     this.sessions = new Map();
     this.joining = new Map();
+    this.joinAttempts = new Map();
 
     // Nodes marked preferred:true (config) are used first while connected;
     // everything else is a fallback, ordered by load.
@@ -281,7 +281,7 @@ class MusicManager {
         restTimeout: 30,
         voiceConnectionTimeout: 15,
         userAgent: 'private-music-bot/1.0',
-        nodeResolver: (nodes) => [...nodes.values()].filter((n) => n.state === CONNECTED).sort(rank).shift(),
+        nodeResolver: (nodes, connection) => this.resolveNode(nodes, connection, rank),
       },
     );
     this.rank = rank;
@@ -322,6 +322,15 @@ class MusicManager {
     return [...this.shoukaku.nodes.values()].filter((n) => n.state === CONNECTED).sort(this.rank);
   }
 
+  resolveNode(nodes, connection, rank = this.rank) {
+    const connected = [...nodes.values()].filter((node) => node.state === CONNECTED);
+    const attempt = connection && this.joinAttempts.get(connection.guildId);
+    const candidates = attempt ? connected.filter((node) => !attempt.failed.has(node.name)) : connected;
+    const selected = candidates.sort(rank).shift();
+    if (attempt) attempt.selected = selected?.name || null;
+    return selected;
+  }
+
   /** Join (or reuse) the voice session for a guild. */
   async ensureSession(guild, voiceChannelId, textChannelId) {
     const existing = this.sessions.get(guild.id);
@@ -329,22 +338,46 @@ class MusicManager {
     if (this.joining.has(guild.id)) return this.joining.get(guild.id);
 
     const promise = (async () => {
-      const player = await this.shoukaku.joinVoiceChannel({
-        guildId: guild.id,
-        channelId: voiceChannelId,
-        shardId: guild.shardId,
-        deaf: true,
-      });
-      const session = new GuildMusic(this, guild.id, player, voiceChannelId, textChannelId);
-      session.bindPlayer();
-      this.sessions.set(guild.id, session);
-      session.voiceStatusEnabled = await this.store.getVoiceStatus(guild.id);
+      const attempt = { failed: new Set(), selected: null };
+      this.joinAttempts.set(guild.id, attempt);
       try {
-        await player.setGlobalVolume(session.volume);
-      } catch {
-        /* volume is applied on the next track anyway */
+        let player;
+        let lastError;
+        const maxAttempts = this.connectedNodes().length;
+
+        for (let index = 0; index < maxAttempts; index++) {
+          attempt.selected = null;
+          try {
+            player = await this.shoukaku.joinVoiceChannel({
+              guildId: guild.id,
+              channelId: voiceChannelId,
+              shardId: guild.shardId,
+              deaf: true,
+            });
+            break;
+          } catch (err) {
+            lastError = err;
+            if (!attempt.selected) break;
+            attempt.failed.add(attempt.selected);
+            console.warn(`[music:${guild.id}] voice join failed on ${attempt.selected}; trying another node: ${err.message}`);
+          }
+        }
+
+        if (!player) throw lastError || new Error('No connected Lavalink nodes are available.');
+
+        const session = new GuildMusic(this, guild.id, player, voiceChannelId, textChannelId);
+        session.bindPlayer();
+        this.sessions.set(guild.id, session);
+        session.voiceStatusEnabled = await this.store.getVoiceStatus(guild.id);
+        try {
+          await player.setGlobalVolume(session.volume);
+        } catch {
+          /* volume is applied on the next track anyway */
+        }
+        return session;
+      } finally {
+        this.joinAttempts.delete(guild.id);
       }
-      return session;
     })();
 
     this.joining.set(guild.id, promise);
@@ -376,7 +409,7 @@ class MusicManager {
    * SoundCloud so one blocked node/source does not break /play.
    */
   async resolve(query) {
-    const nodes = this.connectedNodes().slice(0, MAX_NODES_TRIED);
+    const nodes = this.connectedNodes();
     if (!nodes.length) return { type: 'nodes_down' };
 
     const identifiers = isUrl(query) ? [query] : SEARCH_PREFIXES.map((p) => p + query);
@@ -407,7 +440,7 @@ class MusicManager {
     const author = String(entry.info.author || '').replace(/ - topic$/i, '');
     const query = `${prefix}${title} ${author}`.trim();
 
-    for (const node of this.connectedNodes().slice(0, MAX_NODES_TRIED)) {
+    for (const node of this.connectedNodes()) {
       try {
         const res = await node.rest.resolve(query);
         if (res?.loadType !== LoadType.SEARCH || !res.data.length) continue;

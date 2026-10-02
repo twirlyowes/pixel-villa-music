@@ -10,7 +10,8 @@ const { config } = require('../src/config');
 const { Store } = require('../src/store');
 const { parseArgs, createHandlers } = require('../src/handlers');
 const { commands, byName, buildSlashDefinitions } = require('../src/commands');
-const { GuildMusic } = require('../src/music');
+const { MusicManager, GuildMusic } = require('../src/music');
+const { Constants } = require('shoukaku');
 const ui = require('../src/ui');
 const { parseTime, fmtTime } = require('../src/util');
 
@@ -57,6 +58,31 @@ const ok = (name) => { passed++; console.log('  ok', name); };
   assert.strictEqual(await store.isNoPrefix('g1', 'u1'), false);
   ok('store add/remove/prefix');
   await store.setPrefix('g1', '.');
+
+  // ---- Lavalink node join failover
+  const joinManager = Object.create(MusicManager.prototype);
+  joinManager.sessions = new Map();
+  joinManager.joining = new Map();
+  joinManager.joinAttempts = new Map();
+  joinManager.rank = (a, b) => a.penalties - b.penalties;
+  joinManager.store = { getVoiceStatus: async () => false };
+  const joinedNodes = [];
+  const joinPlayer = Object.assign(new EventEmitter(), { setGlobalVolume: async () => {} });
+  const nodeNames = ['Serenetia-V4', 'HeavenCloud-IN', 'HeavenCloud-US', 'Trinium'];
+  joinManager.shoukaku = {
+    nodes: new Map(nodeNames.map((name) => [name, { name, state: Constants.State.CONNECTED, penalties: 0 }])),
+    joinVoiceChannel: async () => {
+      const node = joinManager.resolveNode(joinManager.shoukaku.nodes, { guildId: 'join-test' });
+      joinedNodes.push(node.name);
+      if (node.name !== 'Trinium') throw new Error(`${node.name} REST unavailable`);
+      return joinPlayer;
+    },
+  };
+  const joinedSession = await joinManager.ensureSession({ id: 'join-test', shardId: 0 }, 'v1', 't1');
+  assert.deepStrictEqual(joinedNodes, nodeNames);
+  assert.strictEqual(joinedSession.player, joinPlayer);
+  assert.strictEqual(joinManager.joinAttempts.size, 0);
+  ok('voice join retries distinct nodes through fourth candidate');
 
   // ---- session logic with a fake Lavalink player
   const sent = [];
