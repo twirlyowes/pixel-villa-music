@@ -5,6 +5,7 @@ const { Routes } = require('discord.js');
 const { config } = require('./config');
 const { isUrl, shuffleInPlace, truncate } = require('./util');
 const ui = require('./ui');
+const { parseSpotifyUrl, loadSpotify } = require('./spotify');
 
 const CONNECTED = Constants.State.CONNECTED;
 const SEARCH_PREFIXES = ['ytsearch:', 'scsearch:'];
@@ -412,6 +413,9 @@ class MusicManager {
     const nodes = this.connectedNodes();
     if (!nodes.length) return { type: 'nodes_down' };
 
+    const spotify = parseSpotifyUrl(query);
+    if (spotify) return this.resolveSpotify(spotify, nodes);
+
     const identifiers = isUrl(query) ? [query] : SEARCH_PREFIXES.map((p) => p + query);
     let lastError = null;
 
@@ -430,6 +434,55 @@ class MusicManager {
       }
     }
     return { type: lastError ? 'error' : 'empty', error: lastError };
+  }
+
+  /**
+   * Spotify gives us metadata only, not audio. Read title + artist from the
+   * link, then find each song on YouTube (SoundCloud as fallback).
+   */
+  async resolveSpotify(link, nodes) {
+    let meta;
+    try {
+      meta = await loadSpotify(link);
+    } catch (err) {
+      console.warn(`[spotify] ${link.type}/${link.id} failed: ${err.message}`);
+      return { type: 'error', error: `I couldn't read that Spotify link (${err.message}). Try a song name or a YouTube link.` };
+    }
+    if (!meta.tracks.length) return { type: 'empty' };
+
+    const wanted = meta.tracks.slice(0, config.maxPlaylistImport);
+    const matched = new Array(wanted.length).fill(null);
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < wanted.length) {
+        const i = cursor++;
+        matched[i] = await this.matchSpotifyTrack(wanted[i], nodes);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(6, wanted.length) }, worker));
+
+    const tracks = matched.filter(Boolean);
+    if (!tracks.length) return { type: 'empty' };
+    if (link.type === 'track') return { type: 'track', tracks };
+    return { type: 'playlist', name: meta.name, tracks };
+  }
+
+  async matchSpotifyTrack(t, nodes) {
+    const query = `${t.title} ${t.artist}`.trim();
+    for (const prefix of SEARCH_PREFIXES) {
+      for (const node of nodes) {
+        try {
+          const res = await node.rest.resolve(prefix + query);
+          if (res?.loadType !== LoadType.SEARCH || !res.data.length) continue;
+          if (!t.durationMs) return res.data[0];
+          const close = res.data.find((x) => Math.abs(x.info.length - t.durationMs) <= Math.max(15000, t.durationMs * 0.2));
+          return close || res.data[0];
+        } catch {
+          /* try the next node */
+        }
+      }
+    }
+    return null;
   }
 
   /** Find the same song on the "other" source for failover. */
