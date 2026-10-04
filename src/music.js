@@ -8,7 +8,8 @@ const ui = require('./ui');
 const { parseSpotifyUrl, loadSpotify } = require('./spotify');
 
 const CONNECTED = Constants.State.CONNECTED;
-const SEARCH_PREFIXES = ['ytsearch:', 'scsearch:'];
+// SoundCloud first: YouTube is often throttled on cloud IPs and stalls for ~10s.
+const SEARCH_PREFIXES = ['scsearch:', 'ytsearch:'];
 
 /** One instance per server the bot is playing in. */
 class GuildMusic {
@@ -471,20 +472,29 @@ class MusicManager {
 
   async matchSpotifyTrack(t, nodes) {
     const query = `${t.title} ${t.artist}`.trim();
+    // Skip remixes / sped-up / covers unless the Spotify title itself says so.
+    const variant = /remix|sped up|speed up|slowed|nightcore|cover|karaoke|8d/i;
+    const wantsVariant = variant.test(t.title);
+    let fallback = null;
+
     for (const prefix of SEARCH_PREFIXES) {
       for (const node of nodes) {
         try {
           const res = await node.rest.resolve(prefix + query);
           if (res?.loadType !== LoadType.SEARCH || !res.data.length) continue;
-          if (!t.durationMs) return res.data[0];
-          const close = res.data.find((x) => Math.abs(x.info.length - t.durationMs) <= Math.max(15000, t.durationMs * 0.2));
-          return close || res.data[0];
+          const candidates = wantsVariant ? res.data : res.data.filter((x) => !variant.test(x.info.title));
+          if (!candidates.length) break; // this source only has variants: try the next source
+          if (!t.durationMs) return candidates[0];
+          const close = candidates.find((x) => Math.abs(x.info.length - t.durationMs) <= Math.max(15000, t.durationMs * 0.2));
+          if (close) return close;
+          fallback = fallback || candidates[0]; // wrong length: remember it, but try the next source first
+          break;
         } catch {
           /* try the next node */
         }
       }
     }
-    return null;
+    return fallback;
   }
 
   /** Find the same song on the "other" source for failover. */
