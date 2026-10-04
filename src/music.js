@@ -357,6 +357,8 @@ class MusicManager {
             });
             break;
           } catch (err) {
+            // Shoukaku hides the HTTP status when a node answers with a non-JSON error page.
+            if (err?.status && !String(err.message).includes(`HTTP ${err.status}`)) err.message = `${err.message} (HTTP ${err.status} from ${attempt.selected || 'node'})`;
             lastError = err;
             if (!attempt.selected) break;
             attempt.failed.add(attempt.selected);
