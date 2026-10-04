@@ -8,8 +8,14 @@ const ui = require('./ui');
 const { parseSpotifyUrl, loadSpotify } = require('./spotify');
 
 const CONNECTED = Constants.State.CONNECTED;
-// SoundCloud first: YouTube is often throttled on cloud IPs and stalls for ~10s.
-const SEARCH_PREFIXES = ['scsearch:', 'ytsearch:'];
+// Source order for searches. SoundCloud first by default because YouTube is often
+// throttled on cloud IPs. Once YouTube works for you, set the env var
+// SEARCH_ORDER=ytsearch,scsearch on Render (no code change needed).
+const parsedOrder = String(process.env.SEARCH_ORDER || 'scsearch,ytsearch')
+  .split(',')
+  .map((x) => x.trim().toLowerCase())
+  .filter((x) => x === 'ytsearch' || x === 'scsearch');
+const SEARCH_PREFIXES = (parsedOrder.length ? parsedOrder : ['scsearch', 'ytsearch']).map((x) => `${x}:`);
 
 /** One instance per server the bot is playing in. */
 class GuildMusic {
