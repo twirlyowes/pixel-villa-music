@@ -541,5 +541,42 @@ class MusicManager {
     }
     return null;
   }
+// ---------- voice events ----------
+  onVoiceStateUpdate(oldState, newState) {
+    const guildId = newState.guild.id;
+    const session = this.sessions.get(guildId);
+    if (!session) return;
+    const botId = this.client.user.id;
 
-  // ----
+    if (newState.id === botId) {
+      if (!newState.channelId) return void this.destroy(guildId);
+      session.voiceChannelId = newState.channelId; // moved by a moderator
+    }
+
+    const channel = newState.guild.channels.cache.get(session.voiceChannelId);
+    if (!channel) return;
+    const humans = channel.members.filter((m) => !m.user.bot).size;
+
+    if (humans === 0) {
+      if (!session.aloneTimer) {
+        session.aloneTimer = setTimeout(() => this.destroy(guildId), config.aloneLeaveMs);
+      }
+    } else if (session.aloneTimer) {
+      clearTimeout(session.aloneTimer);
+      session.aloneTimer = null;
+    }
+  }
+
+  status() {
+    return [...this.shoukaku.nodes.values()].map((n) => ({
+      name: n.name,
+      connected: n.state === CONNECTED,
+      players: n.stats?.players ?? 0,
+      playing: n.stats?.playingPlayers ?? 0,
+      cpu: n.stats?.cpu?.lavalinkLoad ?? null,
+      penalties: n.penalties,
+    }));
+  }
+}
+
+module.exports = { MusicManager, GuildMusic };
