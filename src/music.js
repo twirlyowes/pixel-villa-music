@@ -17,6 +17,19 @@ const parsedOrder = String(process.env.SEARCH_ORDER || 'scsearch,ytsearch')
   .filter((x) => x === 'ytsearch' || x === 'scsearch');
 const SEARCH_PREFIXES = (parsedOrder.length ? parsedOrder : ['scsearch', 'ytsearch']).map((x) => `${x}:`);
 
+// SoundCloud serves only a ~30s preview for many official (paywalled) songs.
+// Those tracks look normal in search results, so detect them and skip them.
+function isPreview(track) {
+  try {
+    if (String(track?.info?.sourceName || '').toLowerCase() !== 'soundcloud') return false;
+    const len = Number(track.info.length);
+    if (len >= 29000 && len <= 31000) return true;
+    return Buffer.from(String(track.encoded || ''), 'base64').toString('latin1').includes('/preview/');
+  } catch {
+    return false;
+  }
+}
+
 /** One instance per server the bot is playing in. */
 class GuildMusic {
   constructor(manager, guildId, player, voiceChannelId, textChannelId) {
@@ -435,7 +448,10 @@ class MusicManager {
           if (!res) continue;
           if (res.loadType === LoadType.TRACK) return { type: 'track', tracks: [res.data] };
           if (res.loadType === LoadType.PLAYLIST) return { type: 'playlist', name: res.data.info.name, tracks: res.data.tracks };
-          if (res.loadType === LoadType.SEARCH && res.data.length) return { type: 'search', tracks: res.data };
+          if (res.loadType === LoadType.SEARCH) {
+            const full = res.data.filter((t) => !isPreview(t));
+            if (full.length) return { type: 'search', tracks: full };
+          }
           if (res.loadType === LoadType.ERROR) lastError = res.data?.message || 'load error';
         } catch (err) {
           lastError = err.message;
@@ -488,7 +504,8 @@ class MusicManager {
         try {
           const res = await node.rest.resolve(prefix + query);
           if (res?.loadType !== LoadType.SEARCH || !res.data.length) continue;
-          const candidates = wantsVariant ? res.data : res.data.filter((x) => !variant.test(x.info.title));
+          const pool = res.data.filter((x) => !isPreview(x));
+          const candidates = wantsVariant ? pool : pool.filter((x) => !variant.test(x.info.title));
           if (!candidates.length) break; // this source only has variants: try the next source
           if (!t.durationMs) return candidates[0];
           const close = candidates.find((x) => Math.abs(x.info.length - t.durationMs) <= Math.max(15000, t.durationMs * 0.2));
@@ -516,7 +533,7 @@ class MusicManager {
         const res = await node.rest.resolve(query);
         if (res?.loadType !== LoadType.SEARCH || !res.data.length) continue;
         const len = entry.info.length;
-        const close = res.data.find((t) => entry.info.isStream || Math.abs(t.info.length - len) <= Math.max(15000, len * 0.2));
+        const close = res.data.find((t) => !isPreview(t) && (entry.info.isStream || Math.abs(t.info.length - len) <= Math.max(15000, len * 0.2)));
         return close || null;
       } catch {
         /* try next node */
@@ -525,42 +542,4 @@ class MusicManager {
     return null;
   }
 
-  // ---------- voice events ----------
-  onVoiceStateUpdate(oldState, newState) {
-    const guildId = newState.guild.id;
-    const session = this.sessions.get(guildId);
-    if (!session) return;
-    const botId = this.client.user.id;
-
-    if (newState.id === botId) {
-      if (!newState.channelId) return void this.destroy(guildId);
-      session.voiceChannelId = newState.channelId; // moved by a moderator
-    }
-
-    const channel = newState.guild.channels.cache.get(session.voiceChannelId);
-    if (!channel) return;
-    const humans = channel.members.filter((m) => !m.user.bot).size;
-
-    if (humans === 0) {
-      if (!session.aloneTimer) {
-        session.aloneTimer = setTimeout(() => this.destroy(guildId), config.aloneLeaveMs);
-      }
-    } else if (session.aloneTimer) {
-      clearTimeout(session.aloneTimer);
-      session.aloneTimer = null;
-    }
-  }
-
-  status() {
-    return [...this.shoukaku.nodes.values()].map((n) => ({
-      name: n.name,
-      connected: n.state === CONNECTED,
-      players: n.stats?.players ?? 0,
-      playing: n.stats?.playingPlayers ?? 0,
-      cpu: n.stats?.cpu?.lavalinkLoad ?? null,
-      penalties: n.penalties,
-    }));
-  }
-}
-
-module.exports = { MusicManager, GuildMusic };
+  // ----
